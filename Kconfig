@@ -1,0 +1,6 @@
+config INPUT_TPS43
+	bool "Azoteq TPS43 capacitive track-pad"
+	depends on GPIO && I2C && INPUT && ZMK_POINTING
+	default y
+	help
+	  Enable the TPS43 touch-pad driver for ZMK.

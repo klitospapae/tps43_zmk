@@ -1,0 +1,19 @@
+description: Azoteq TPS43 capacitive touch-pad
+
+compatible: "azoteq,tps43"
+
+include: ["i2c-device.yaml"]
+
+properties:
+  int-gpios:
+    type: phandle-array
+    description: Ready/DRDY interrupt (active low)
+
+  reset-gpios:
+    type: phandle-array
+    description: Chip reset (active low)
+
+  azoteq,max-xy:
+    type: array
+    required: false
+    description: Maximum X and Y raw values from the pad
