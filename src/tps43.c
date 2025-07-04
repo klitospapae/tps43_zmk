@@ -46,7 +46,7 @@ static void tps43_process(struct k_work *work)
 	uint8_t buf[4];
 
 	/* 12-bit X / Y, little-endian */
-	if (i2c_reg_read_buf_dt(&cfg->bus, REG_X_LSB, buf, sizeof(buf))) {
+	if (i2c_reg_read_byte_dt(&cfg->bus, REG_X_LSB, buf, sizeof(buf))) {
 		LOG_DBG("I²C read failed");
 		return;
 	}
