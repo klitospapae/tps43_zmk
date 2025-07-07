@@ -1,134 +1,146 @@
-/* 
- * Azoteq TPS43 capacitive track-pad – ZMK edition
- */
+// tps43.cpp – Azoteq TPS43 touch‑pad driver (C++17 + Zephyr 3.6 / ZMK)
+// SPDX‑License‑Identifier: Apache‑2.0
 
-#include <zephyr/drivers/gpio.h>
-#include <zephyr/drivers/i2c.h>
-#include <zephyr/input/input.h>
+// ──────────────────────────────────────────────────────────────────────────────
+// NOTE ❶: this file is meant to be compiled as **C++** inside a ZMK module.
+//         Add to your CMakeLists.txt with `zephyr_library_sources(tps43.cpp)`.
+//
+// NOTE ❷: set these Kconfig options so the Zephyr build picks up C++:
+//         CONFIG_CPLUSPLUS=y
+//         CONFIG_LIB_CPLUSPLUS=y   # pulls in the minimal libstdc++ stub
+// ──────────────────────────────────────────────────────────────────────────────
+
 #include <zephyr/kernel.h>
+
+/*
+ * Zephyr headers are written in C.  They already handle the __cplusplus guard
+ * internally, so we *only* need to prevent *our* names from being mangled
+ * when the device table refers to them.  The easiest is to compile this whole
+ * TU as C++ but keep the external function names unmangled—hence the extern
+ * "C" around function prototypes that land in DEVICE_DT_INST_DEFINE.
+ */
+extern "C" {
+#include <zephyr/drivers/i2c.h>
+#include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/input/input.h>
 #include <zephyr/logging/log.h>
+}
 
 LOG_MODULE_REGISTER(tps43, LOG_LEVEL_INF);
 
-/* -------------------------------------------------------------------------- */
-
+// ──────────────────────────────────────────────────────────────────────────────
+// Device‑tree interface
+// ──────────────────────────────────────────────────────────────────────────────
 #define DT_DRV_COMPAT azoteq_tps43
 
 /* TPS43 register map (subset) */
-#define REG_X_LSB         0x30
-#define REG_GESTURE_EVENT 0x3E
+static constexpr uint8_t REG_X_LSB         = 0x30;
+static constexpr uint8_t REG_GESTURE_EVENT = 0x3E;
 
-/* -------------------------------------------------------------------------- */
-/* Build-time constants pulled from DTS                                       */
-
+// ──────────────────────────────────────────────────────────────────────────────
+// Build‑time configuration that lives in flash/rodata
+// ──────────────────────────────────────────────────────────────────────────────
 struct tps43_config {
-	struct i2c_dt_spec bus;
-	struct gpio_dt_spec int_gpio;
-	struct gpio_dt_spec rst_gpio;
+    i2c_dt_spec bus;          // I2C peripheral + address
+    gpio_dt_spec int_gpio;    // RDY/INT (active‑low)
+    gpio_dt_spec rst_gpio;    // Hardware reset (active‑low)
 };
 
-/* -------------------------------------------------------------------------- */
-/* Runtime state                                                              */
-
+// ──────────────────────────────────────────────────────────────────────────────
+// Runtime state (RAM)
+// ──────────────────────────────────────────────────────────────────────────────
 struct tps43_data {
-	const struct device *dev;      /* back-pointer for input_report_*     */
-	struct gpio_callback int_cb;
-	struct k_work work;
+    const device *dev{};      // back‑pointer – needed by input API
+    gpio_callback int_cb{};   // ISR hook structure
+    k_work work{};            // deferred worker
 };
 
-/* -------------------------------------------------------------------------- */
-
-static void tps43_process(struct k_work *work)
+// ──────────────────────────────────────────────────────────────────────────────
+// Helper: read XY and push to ZMK
+// ──────────────────────────────────────────────────────────────────────────────
+static void tps43_process(k_work *work)
 {
-	struct tps43_data    *data = CONTAINER_OF(work, struct tps43_data, work);
-	const struct tps43_config *cfg  = data->dev->config;
+    auto *data = CONTAINER_OF(work, tps43_data, work);
+    auto *cfg  = static_cast<const tps43_config *>(data->dev->config);
 
-	uint8_t buf[4];
+    uint8_t buf[4];  // X LSB/MSB, Y LSB/MSB
 
-	/* 12-bit X / Y, little-endian */
-	if (i2c_reg_read_byte_dt(&cfg->bus, REG_X_LSB, buf, sizeof(buf))) {
-		LOG_DBG("I²C read failed");
-		return;
-	}
+    if (i2c_reg_read_buf_dt(&cfg->bus, REG_X_LSB, buf, sizeof(buf)) < 0) {
+        LOG_DBG("I²C read failed");
+        return;
+    }
 
-	uint16_t x = buf[0] | (buf[1] << 8);
-	uint16_t y = buf[2] | (buf[3] << 8);
+    uint16_t x = static_cast<uint16_t>(buf[0]) | (static_cast<uint16_t>(buf[1]) << 8);
+    uint16_t y = static_cast<uint16_t>(buf[2]) | (static_cast<uint16_t>(buf[3]) << 8);
 
-	input_report_abs(data->dev, INPUT_ABS_X, x, false, K_NO_WAIT);
-	input_report_abs(data->dev, INPUT_ABS_Y, y, false, K_NO_WAIT);
-	input_report_key(data->dev, INPUT_BTN_TOUCH, 1, true, K_NO_WAIT);
-	input_sync(data->dev);
+    input_report_abs(data->dev, INPUT_ABS_X, x, false, K_NO_WAIT);
+    input_report_abs(data->dev, INPUT_ABS_Y, y, false, K_NO_WAIT);
+    input_report_key(data->dev, INPUT_BTN_TOUCH, 1, true, K_NO_WAIT);
+    input_sync(data->dev);
 }
 
-static void tps43_isr(const struct device *port,
-		      struct gpio_callback *cb,
-		      uint32_t pins)
+// ──────────────────────────────────────────────────────────────────────────────
+// GPIO interrupt shim: schedule the worker
+// ──────────────────────────────────────────────────────────────────────────────
+static void tps43_isr(const device * /*port*/, gpio_callback *cb, uint32_t /*pins*/)
 {
-	ARG_UNUSED(port);
-	ARG_UNUSED(pins);
-
-	struct tps43_data *data = CONTAINER_OF(cb, struct tps43_data, int_cb);
-	k_work_submit(&data->work);
+    auto *data = CONTAINER_OF(cb, tps43_data, int_cb);
+    k_work_submit(&data->work);
 }
 
-/* -------------------------------------------------------------------------- */
-
-static int tps43_init(const struct device *dev)
+// ──────────────────────────────────────────────────────────────────────────────
+// Driver initialisation
+// ──────────────────────────────────────────────────────────────────────────────
+static int tps43_init(const device *dev)
 {
-	const struct tps43_config *cfg = dev->config;
-	struct tps43_data        *data = dev->data;
-	int ret;
+    auto *cfg  = static_cast<const tps43_config *>(dev->config);
+    auto *data = static_cast<tps43_data *>(dev->data);
 
-	data->dev = dev;
-	k_work_init(&data->work, tps43_process);
+    data->dev = dev;
+    k_work_init(&data->work, tps43_process);
 
-	/* --- Reset pin ------------------------------------------------------- */
-	ret = gpio_pin_configure_dt(&cfg->rst_gpio, GPIO_OUTPUT_INACTIVE);
-	if (ret) {
-		LOG_ERR("RST GPIO config failed (%d)", ret);
-		return ret;
-	}
-	/* 10 ms low-pulse hardware reset */
-	gpio_pin_set_dt(&cfg->rst_gpio, 0);
-	k_sleep(K_MSEC(1));
-	gpio_pin_set_dt(&cfg->rst_gpio, 1);
-	k_sleep(K_MSEC(10));
+    /* Reset sequence – pull RST low 1 ms, then high, wait 10 ms */
+    if (gpio_pin_configure_dt(&cfg->rst_gpio, GPIO_OUTPUT_INACTIVE) < 0) {
+        LOG_ERR("RST GPIO config failed");
+        return -EINVAL;
+    }
+    k_sleep(K_MSEC(1));
+    gpio_pin_set_dt(&cfg->rst_gpio, 1);
+    k_sleep(K_MSEC(10));
 
-	/* --- INT pin --------------------------------------------------------- */
-	ret = gpio_pin_configure_dt(&cfg->int_gpio, GPIO_INPUT);
-	if (ret) {
-		LOG_ERR("INT GPIO config failed (%d)", ret);
-		return ret;
-	}
+    /* INT line */
+    if (gpio_pin_configure_dt(&cfg->int_gpio, GPIO_INPUT) < 0) {
+        LOG_ERR("INT GPIO config failed");
+        return -EINVAL;
+    }
+    gpio_init_callback(&data->int_cb, tps43_isr, BIT(cfg->int_gpio.pin));
+    gpio_add_callback(cfg->int_gpio.port, &data->int_cb);
+    gpio_pin_interrupt_configure_dt(&cfg->int_gpio, GPIO_INT_EDGE_TO_ACTIVE);
 
-	gpio_init_callback(&data->int_cb, tps43_isr,
-			   BIT(cfg->int_gpio.pin));
-	gpio_add_callback(cfg->int_gpio.port, &data->int_cb);
-	gpio_pin_interrupt_configure_dt(&cfg->int_gpio,
-					GPIO_INT_EDGE_TO_ACTIVE);
-
-	LOG_INF("TPS43 initialised");
-	return 0;
+    LOG_INF("TPS43 ready – driver initialised");
+    return 0;
 }
 
-/* Zephyr input driver shim (we only need the generic helper table) */
-static const struct input_driver_api tps43_api = { 0 };
+// ──────────────────────────────────────────────────────────────────────────────
+// Zephyr boiler‑plate to create each instance listed in the devicetree
+// ──────────────────────────────────────────────────────────────────────────────
+static constexpr input_driver_api tps43_api{}; // empty – we only need the struct
 
-/* -------------------------------------------------------------------------- */
-/* One instance per DT node with status = "okay"                              */
-
-#define TPS43_INST(idx)                                                         \
-	static struct tps43_data   tps43_data_##idx;                            \
-	static const struct tps43_config tps43_config_##idx = {                 \
-		.bus       = I2C_DT_SPEC_INST_GET(idx),                         \
-		.int_gpio  = GPIO_DT_SPEC_INST_GET(idx, int_gpios),             \
-		.rst_gpio  = GPIO_DT_SPEC_INST_GET(idx, reset_gpios),           \
-	};                                                                       \
-	DEVICE_DT_INST_DEFINE(idx,                                                \
-			      tps43_init, NULL,                                 \
-			      &tps43_data_##idx, &tps43_config_##idx,           \
-			      POST_KERNEL, CONFIG_INPUT_INIT_PRIORITY,         \
-			      &tps43_api);
+#define TPS43_INST(idx)                                                                  \
+    static tps43_data   tps43_data_##idx{};                                              \
+    static constexpr tps43_config tps43_config_##idx = {                                 \
+        I2C_DT_SPEC_INST_GET(idx),       /* bus */                                       \
+        GPIO_DT_SPEC_INST_GET(idx, int_gpios),                                           \
+        GPIO_DT_SPEC_INST_GET(idx, reset_gpios)                                          \
+    };                                                                                   \
+    DEVICE_DT_INST_DEFINE(idx,                                                           \
+                          tps43_init,                                                    \
+                          nullptr,            /* PM control fn – none */                 \
+                          &tps43_data_##idx,                                            \
+                          &tps43_config_##idx,                                          \
+                          POST_KERNEL,                                                   \
+                          CONFIG_INPUT_INIT_PRIORITY,                                    \
+                          &tps43_api);
 
 DT_INST_FOREACH_STATUS_OKAY(TPS43_INST)
 
