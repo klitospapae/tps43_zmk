@@ -11,20 +11,10 @@
 // ──────────────────────────────────────────────────────────────────────────────
 
 #include <zephyr/kernel.h>
-
-/*
- * Zephyr headers are written in C.  They already handle the __cplusplus guard
- * internally, so we *only* need to prevent *our* names from being mangled
- * when the device table refers to them.  The easiest is to compile this whole
- * TU as C++ but keep the external function names unmangled—hence the extern
- * "C" around function prototypes that land in DEVICE_DT_INST_DEFINE.
- */
-extern "C" {
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/input/input.h>
 #include <zephyr/logging/log.h>
-}
 
 LOG_MODULE_REGISTER(tps43, LOG_LEVEL_INF);
 
