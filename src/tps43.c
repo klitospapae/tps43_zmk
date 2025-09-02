@@ -1,19 +1,5 @@
-// tps43.cpp – Azoteq TPS43 touch‑pad driver (C++17 + Zephyr 3.6 / ZMK)
-// SPDX‑License‑Identifier: Apache‑2.0
-
-// ──────────────────────────────────────────────────────────────────────────────
-// NOTE ❶: this file is meant to be compiled as **C++** inside a ZMK module.
-//         Add to your CMakeLists.txt with `zephyr_library_sources(tps43.cpp)`.
-//
-// NOTE ❷: set these Kconfig options so the Zephyr build picks up C++:
-//         CONFIG_CPLUSPLUS=y
-//         CONFIG_LIB_CPLUSPLUS=y   # pulls in the minimal libstdc++ stub
-// ──────────────────────────────────────────────────────────────────────────────
-
-#include <zephyr/kernel.h>
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/drivers/gpio.h>
-#include <zephyr/drivers/input/input.h>
 #include <zephyr/logging/log.h>
 
 LOG_MODULE_REGISTER(tps43, LOG_LEVEL_INF);
